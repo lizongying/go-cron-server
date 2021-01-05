@@ -35,13 +35,13 @@ var (
 )
 
 func init() {
-	errFile, err := os.OpenFile("go_cron.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	logFile, err := os.OpenFile("go_cron.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
 		log.Fatalln("open log file failed")
 	}
 	Info = log.New(os.Stdout, "Info:", log.Ldate|log.Ltime|log.Lshortfile)
 	Warning = log.New(os.Stdout, "Warning:", log.Ldate|log.Ltime|log.Lshortfile)
-	Error = log.New(io.MultiWriter(os.Stderr, errFile), "Error:", log.Ldate|log.Ltime|log.Lshortfile)
+	Error = log.New(io.MultiWriter(os.Stderr, logFile), "Error:", log.Ldate|log.Ltime|log.Lshortfile)
 }
 
 func main() {
@@ -55,7 +55,7 @@ func run() {
 		conf, err := ioutil.ReadFile("go_cron.json")
 		if err != nil {
 			Error.Println("read config file failed")
-			time.Sleep(10 * time.Second)
+			time.Sleep(time.Minute)
 			continue
 		}
 		var confList []struct {
