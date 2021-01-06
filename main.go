@@ -34,8 +34,10 @@ var (
 	Error   *log.Logger
 )
 
+var Interval = time.Minute
+
 func init() {
-	logFile, err := os.OpenFile("go_cron.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	logFile, err := os.OpenFile("cron.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
 		log.Fatalln("open log file failed")
 	}
@@ -52,10 +54,10 @@ func run() {
 	c := cron.New()
 	c.Start()
 	for {
-		conf, err := ioutil.ReadFile("go_cron.json")
+		conf, err := ioutil.ReadFile("cron.json")
 		if err != nil {
 			Error.Println("read config file failed")
-			time.Sleep(time.Minute)
+			time.Sleep(Interval)
 			continue
 		}
 		var confList []struct {
@@ -116,7 +118,7 @@ func run() {
 				}
 			}(cmd)
 		}
-		time.Sleep(time.Minute)
+		time.Sleep(Interval)
 	}
 }
 
