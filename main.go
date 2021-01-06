@@ -106,6 +106,7 @@ func run() {
 						//修改任务
 						if TaskMap[taskId].Md5 != taskMd5 {
 							entryIDOld := entryID
+							cmdOld := cmd
 							entryID, _ = c.AddFunc(spec, func() {
 								execScript(cmd)
 							})
@@ -117,7 +118,7 @@ func run() {
 							TaskMap[taskId].EntryID = entryID
 							Info.Println("add cmd from cron:", cmd)
 							c.Remove(entryIDOld)
-							Info.Println("remove cmd from cron:", cmd)
+							Info.Println("remove cmd from cron:", cmdOld)
 						}
 						return
 					}
