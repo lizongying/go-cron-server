@@ -1,9 +1,10 @@
 [
   {
-    "script": "sleep 100",
+    "id": 1,
+    "script": "sleep 200",
     "dir": "",
     "spec": "* * * * *",
-    "server": "",
+    "server": "jelly01",
     "enable": true
   }
 ]

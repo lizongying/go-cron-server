@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"github.com/robfig/cron/v3"
@@ -17,8 +18,10 @@ import (
 type Task struct {
 	EntryID cron.EntryID
 	Pid     int
+	Md5     string
 }
 type Cmd struct {
+	Id     int
 	Script string
 	Dir    string
 	Spec   string
@@ -26,7 +29,7 @@ type Cmd struct {
 	Enable bool
 }
 
-var TaskMap = make(map[string]*Task, 0)
+var TaskMap = make(map[int]*Task, 0)
 
 var (
 	Info    *log.Logger
@@ -61,6 +64,7 @@ func run() {
 			continue
 		}
 		var confList []struct {
+			Id     int    `json:"id"`
 			Script string `json:"script"`
 			Dir    string `json:"dir"`
 			Spec   string `json:"spec"`
@@ -72,49 +76,75 @@ func run() {
 		}
 		var cmdList []Cmd
 		for _, cmd := range confList {
-			cmdList = append(cmdList, Cmd{Script: cmd.Script, Dir: cmd.Dir, Spec: cmd.Spec, Server: cmd.Server, Enable: cmd.Enable})
+			cmdList = append(cmdList, Cmd{
+				Id:     cmd.Id,
+				Script: cmd.Script,
+				Dir:    cmd.Dir,
+				Spec:   cmd.Spec,
+				Server: cmd.Server,
+				Enable: cmd.Enable,
+			})
 		}
 		for _, cmd := range cmdList {
 			go func(cmd Cmd) {
+				taskId := cmd.Id
 				script := cmd.Script
-				server := cmd.Server
-				spec := cmd.Spec
-				if server != "" {
-					script = fmt.Sprintf("ssh %s %s", server, script)
-				}
-				script = strings.Trim(script, " ")
-				if script == "" {
-					//Warning.Println("script is empty:", script)
-					return
-				}
 				dir := cmd.Dir
+				spec := cmd.Spec
+				server := cmd.Server
 				enable := cmd.Enable
 				if enable {
-					if TaskMap[script] != nil && TaskMap[script].EntryID > 0 {
-						//Info.Println("script is in cron:", script)
+					if TaskMap[taskId] == nil {
+						TaskMap[taskId] = &Task{}
+					}
+					taskMd5 := fmt.Sprintf("%x", md5.Sum([]byte(script+dir+spec+server)))
+					entryID := TaskMap[taskId].EntryID
+					if entryID > 0 {
+						//Info.Println("cmd is in cron:", cmd)
+						//修改任务
+						if TaskMap[taskId].Md5 != taskMd5 {
+							entryIDOld := entryID
+							entryID, _ = c.AddFunc(spec, func() {
+								execScript(cmd)
+							})
+							if entryID == 0 {
+								Info.Println("add cmd failed:", cmd)
+								return
+							}
+							TaskMap[taskId].Md5 = taskMd5
+							TaskMap[taskId].EntryID = entryID
+							Info.Println("add cmd from cron:", cmd)
+							c.Remove(entryIDOld)
+							Info.Println("remove cmd from cron:", cmd)
+						}
 						return
 					}
-					entryID, _ := c.AddFunc(spec, func() {
-						execScript(script, dir)
+					//增加任务
+					entryID, _ = c.AddFunc(spec, func() {
+						execScript(cmd)
 					})
-					if TaskMap[script] == nil {
-						TaskMap[script] = &Task{}
-					}
-					TaskMap[script].EntryID = entryID
-					Info.Println("add script to cron:", script)
-				} else {
-					if TaskMap[script] == nil {
-						//Info.Println("script is not in cron:", script)
+					if entryID == 0 {
+						delete(TaskMap, taskId)
+						Info.Println("add cmd failed:", cmd)
 						return
 					}
-					entryID := TaskMap[script].EntryID
+					TaskMap[taskId].Md5 = taskMd5
+					TaskMap[taskId].EntryID = entryID
+					Info.Println("add cmd to cron:", cmd)
+				} else {
+					//删除任务
+					if TaskMap[taskId] == nil {
+						//Info.Println("cmd is not in cron:", cmd)
+						return
+					}
+					entryID := TaskMap[taskId].EntryID
 					if entryID == 0 {
-						//Info.Println("script is not in cron")
+						//Info.Println("cmd is not in cron:", cmd)
 						return
 					}
 					c.Remove(entryID)
-					delete(TaskMap, "script")
-					Info.Println("remove script from cron:", script)
+					delete(TaskMap, taskId)
+					Info.Println("remove cmd from cron:", cmd)
 				}
 			}(cmd)
 		}
@@ -122,38 +152,44 @@ func run() {
 	}
 }
 
-func execScript(script string, dir string) {
-	pid := TaskMap[script].Pid
+func execScript(cmd Cmd) {
+	taskId := cmd.Id
+	script := cmd.Script
+	dir := cmd.Dir
+	server := cmd.Server
+	if server != "" {
+		script = fmt.Sprintf("ssh %s %s", server, script)
+	}
+	pid := TaskMap[taskId].Pid
 	if pid > 0 {
-		pids := []string{"h", "-o", "stat", "-p", strconv.Itoa(pid)}
-		s, err := infoScript(pids...)
+		s, err := infoScript(pid)
 		if err == nil && len(s) > 0 {
 			switch s[0:1] {
 			case "R",
 				"S":
-				//Info.Println("script is in process:", script)
+				//Info.Println("cmd is in process:", cmd)
 				return
 			}
 		}
 	}
 	s := strings.Split(script, " ")
-	cmd := exec.Command(s[0], s[1:]...)
+	shell := exec.Command(s[0], s[1:]...)
 	if dir != "" {
-		cmd.Dir = dir
+		shell.Dir = dir
 	}
-	err := cmd.Start()
+	err := shell.Start()
 	if err != nil {
-		Error.Println(script, err.Error())
+		Error.Println("cmd run failed:", cmd)
 		return
 	}
-	pid = cmd.Process.Pid
-	TaskMap[script].Pid = pid
-	Info.Println(pid, cmd)
+	pid = shell.Process.Pid
+	TaskMap[taskId].Pid = pid
+	Info.Println(pid, shell)
 }
 
-func infoScript(pids ...string) (string, error) {
-	ps := exec.Command("ps", pids...)
-	out, err := ps.Output()
+func infoScript(pid int) (string, error) {
+	shell := exec.Command("ps", "h", "-o", "stat", "-p", strconv.Itoa(pid))
+	out, err := shell.Output()
 	s := string(out)
 	s = strings.Replace(s, "STAT", "", -1)
 	s = strings.Replace(s, "\n", "", -1)
