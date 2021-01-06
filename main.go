@@ -72,7 +72,9 @@ func run() {
 			Enable bool   `json:"enable"`
 		}
 		if err := json.Unmarshal(conf, &confList); err != nil {
-			Error.Println(err)
+			Error.Println("parse config file failed")
+			time.Sleep(Interval)
+			continue
 		}
 		var cmdList []Cmd
 		for _, cmd := range confList {
@@ -190,6 +192,9 @@ func execScript(cmd Cmd) {
 func infoScript(pid int) (string, error) {
 	shell := exec.Command("ps", "h", "-o", "stat", "-p", strconv.Itoa(pid))
 	out, err := shell.Output()
+	if err != nil {
+		return "", err
+	}
 	s := string(out)
 	s = strings.Replace(s, "STAT", "", -1)
 	s = strings.Replace(s, "\n", "", -1)
