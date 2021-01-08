@@ -17,7 +17,7 @@ go build -o cron
 ```
 
 ```
-./cron
+./cron_server
 ```
 
 ### others

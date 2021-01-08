@@ -1,4 +1,4 @@
-module go-cron
+module go-cron-server
 
 go 1.14
 

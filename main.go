@@ -1,25 +1,16 @@
 package main
 
 import (
-	"crypto/md5"
-	"encoding/json"
-	"fmt"
-	"github.com/robfig/cron/v3"
+	"errors"
 	"io"
-	"io/ioutil"
 	"log"
+	"net"
+	"net/http"
+	"net/rpc"
 	"os"
-	"os/exec"
-	"strconv"
-	"strings"
 	"time"
 )
 
-type Task struct {
-	EntryID cron.EntryID
-	Pid     int
-	Md5     string
-}
 type Cmd struct {
 	Id     int
 	Script string
@@ -29,15 +20,125 @@ type Cmd struct {
 	Enable bool
 }
 
-var TaskMap = make(map[int]*Task, 0)
+type RespAdd struct {
+	Code int
+	Msg  string
+}
+
+type RespPing struct {
+	Code int
+	Msg  string
+}
+
+type RespAddCmd struct {
+	Code int
+	Msg  string
+}
+
+type RespRemoveCmd struct {
+	Code int
+	Msg  string
+}
+
+type Job struct {
+	Script string
+}
+
+type RespListCmd struct {
+	Code int
+	Msg  string
+	Data []Job
+}
+
+var OK = 1
+var ERR = 0
+var ServerUri = "127.0.0.1:1234"
+var PING = time.Second
+var CodeSuccess = 0
+var Success = "success"
+
+type Client struct {
+	Uri     string
+	Client  *rpc.Client
+	Status  int
+	ListCmd []Job
+}
+
+type Server struct {
+	Clients map[string]Client
+}
+
+var Clients = make(map[string]Client)
+
+func (server *Server) run() {
+	if err := rpc.Register(server); err != nil {
+		Error.Println("Server register failed")
+		return
+	}
+	rpc.HandleHTTP()
+	listen, err := net.Listen("tcp", ServerUri)
+	if err != nil {
+		Error.Println("Server listen failed")
+		return
+	}
+	go func() {
+		if err = http.Serve(listen, nil); err != nil {
+			Error.Println("Server failed")
+		}
+	}()
+}
+
+func (server *Server) Add(uri string, respAdd *RespAdd) error {
+	conn, err := rpc.DialHTTP("tcp", uri)
+	if err != nil {
+		Error.Println("Add client failed")
+		return errors.New("add client failed")
+	}
+	Clients[uri] = Client{Uri: uri, Client: conn, Status: OK}
+	server.Clients = Clients
+	respAdd.Msg = Success
+	return nil
+}
+
+func (server *Server) ping() {
+	for {
+		time.Sleep(PING)
+		for _, client := range server.Clients {
+			go func(client Client) {
+				respPing := new(RespPing)
+				ping := client.Client.Go("Client.Ping", "", respPing, nil)
+				replyCall := <-ping.Done
+				if replyCall.Error != nil {
+					client.Status = ERR
+					Error.Println("Ping failed:", client.Uri, replyCall.Error)
+					go func(client Client) {
+						respAdd := new(RespAdd)
+						add := client.Client.Go("Client.Add", "", respAdd, nil)
+						replyCall := <-add.Done
+						if replyCall.Error != nil {
+							client.Status = ERR
+							Error.Println("Add failed:", client.Uri, replyCall.Error)
+							return
+						}
+						Info.Println(respPing.Msg)
+						if respAdd.Code == CodeSuccess {
+							client.Status = OK
+						}
+						Info.Println("add success")
+					}(client)
+					return
+				}
+				Info.Println(respPing.Msg)
+			}(client)
+		}
+	}
+}
 
 var (
 	Info    *log.Logger
 	Warning *log.Logger
 	Error   *log.Logger
 )
-
-var Interval = time.Minute
 
 func init() {
 	logFile, err := os.OpenFile("cron.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
@@ -50,155 +151,53 @@ func init() {
 }
 
 func main() {
-	run()
-	select {}
+	server := new(Server)
+	server.run()
+	server.ping()
+	//cmd := &Cmd{Id: 1, Script: "sleep 100", Spec: "* * * * *"}
 }
-func run() {
-	c := cron.New()
-	c.Start()
-	for {
-		conf, err := ioutil.ReadFile("cron.json")
-		if err != nil {
-			Error.Println("read config file failed")
-			time.Sleep(Interval)
-			continue
-		}
-		var confList []struct {
-			Id     int    `json:"id"`
-			Script string `json:"script"`
-			Dir    string `json:"dir"`
-			Spec   string `json:"spec"`
-			Server string `json:"server"`
-			Enable bool   `json:"enable"`
-		}
-		if err := json.Unmarshal(conf, &confList); err != nil {
-			Error.Println("parse config file failed")
-			time.Sleep(Interval)
-			continue
-		}
-		var cmdList []Cmd
-		for _, cmd := range confList {
-			cmdList = append(cmdList, Cmd{
-				Id:     cmd.Id,
-				Script: cmd.Script,
-				Dir:    cmd.Dir,
-				Spec:   cmd.Spec,
-				Server: cmd.Server,
-				Enable: cmd.Enable,
-			})
-		}
-		for _, cmd := range cmdList {
-			go func(cmd Cmd) {
-				taskId := cmd.Id
-				script := cmd.Script
-				dir := cmd.Dir
-				spec := cmd.Spec
-				server := cmd.Server
-				enable := cmd.Enable
-				if enable {
-					if TaskMap[taskId] == nil {
-						TaskMap[taskId] = &Task{}
-					}
-					taskMd5 := fmt.Sprintf("%x", md5.Sum([]byte(script+dir+spec+server)))
-					entryID := TaskMap[taskId].EntryID
-					if entryID > 0 {
-						//Info.Println("cmd is in cron:", cmd)
-						//修改任务
-						if TaskMap[taskId].Md5 != taskMd5 {
-							entryIDOld := entryID
-							cmdOld := cmd
-							entryID, _ = c.AddFunc(spec, func() {
-								execScript(cmd)
-							})
-							if entryID == 0 {
-								Info.Println("add cmd failed:", cmd)
-								return
-							}
-							TaskMap[taskId].Md5 = taskMd5
-							TaskMap[taskId].EntryID = entryID
-							Info.Println("add cmd from cron:", cmd)
-							c.Remove(entryIDOld)
-							Info.Println("remove cmd from cron:", cmdOld)
-						}
-						return
-					}
-					//增加任务
-					entryID, _ = c.AddFunc(spec, func() {
-						execScript(cmd)
-					})
-					if entryID == 0 {
-						delete(TaskMap, taskId)
-						Info.Println("add cmd failed:", cmd)
-						return
-					}
-					TaskMap[taskId].Md5 = taskMd5
-					TaskMap[taskId].EntryID = entryID
-					Info.Println("add cmd to cron:", cmd)
-				} else {
-					//删除任务
-					if TaskMap[taskId] == nil {
-						//Info.Println("cmd is not in cron:", cmd)
-						return
-					}
-					entryID := TaskMap[taskId].EntryID
-					if entryID == 0 {
-						//Info.Println("cmd is not in cron:", cmd)
-						return
-					}
-					c.Remove(entryID)
-					delete(TaskMap, taskId)
-					Info.Println("remove cmd from cron:", cmd)
-				}
-			}(cmd)
-		}
-		time.Sleep(Interval)
-	}
-}
-
-func execScript(cmd Cmd) {
-	taskId := cmd.Id
-	script := cmd.Script
-	dir := cmd.Dir
-	server := cmd.Server
-	if server != "" {
-		script = fmt.Sprintf("ssh %s %s", server, script)
-	}
-	pid := TaskMap[taskId].Pid
-	if pid > 0 {
-		s, err := infoScript(pid)
-		if err == nil && len(s) > 0 {
-			switch s[0:1] {
-			case "R",
-				"S":
-				//Info.Println("cmd is in process:", cmd)
-				return
-			}
-		}
-	}
-	s := strings.Split(script, " ")
-	shell := exec.Command(s[0], s[1:]...)
-	if dir != "" {
-		shell.Dir = dir
-	}
-	err := shell.Start()
-	if err != nil {
-		Error.Println("cmd run failed:", cmd)
+func AddCmd(client Client) {
+	respAddCmd := new(RespAddCmd)
+	addCmd := client.Client.Go("Client.AddCmd", nil, respAddCmd, nil)
+	replyCall := <-addCmd.Done
+	if replyCall.Error != nil {
+		Error.Println("Add failed:", client.Uri, replyCall.Error)
 		return
 	}
-	pid = shell.Process.Pid
-	TaskMap[taskId].Pid = pid
-	Info.Println(pid, shell)
+	Info.Println(respAddCmd.Msg)
+	if respAddCmd.Code == CodeSuccess {
+		Info.Println("Add success:", client.Uri)
+	}
+	Info.Println("Add success:", client.Uri)
 }
 
-func infoScript(pid int) (string, error) {
-	shell := exec.Command("ps", "h", "-o", "stat", "-p", strconv.Itoa(pid))
-	out, err := shell.Output()
-	if err != nil {
-		return "", err
+func RemoveCmd(client Client) {
+	respRemoveCmd := new(RespRemoveCmd)
+	removeCmd := client.Client.Go("Client.RemoveCmd", nil, respRemoveCmd, nil)
+	replyCall := <-removeCmd.Done
+	if replyCall.Error != nil {
+		Error.Println("Remove failed:", client.Uri, replyCall.Error)
+		return
 	}
-	s := string(out)
-	s = strings.Replace(s, "STAT", "", -1)
-	s = strings.Replace(s, "\n", "", -1)
-	s = strings.Replace(s, " ", "", -1)
-	return s, err
+	Info.Println(respRemoveCmd.Msg)
+	if respRemoveCmd.Code == CodeSuccess {
+		Info.Println("Remove success:", client.Uri)
+	}
+	Info.Println("Remove success:", client.Uri)
+}
+
+func ListCmd(client Client) {
+	respListCmd := new(RespListCmd)
+	listCmd := client.Client.Go("Client.ListCmd", nil, respListCmd, nil)
+	replyCall := <-listCmd.Done
+	if replyCall.Error != nil {
+		Error.Println("List failed:", client.Uri, replyCall.Error)
+		return
+	}
+	Info.Println(respListCmd.Msg)
+	if respListCmd.Code == CodeSuccess {
+		client.ListCmd = respListCmd.Data
+		Info.Println("List success:", client.ListCmd)
+	}
+	Info.Println("List success:", client.ListCmd)
 }
