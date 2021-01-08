@@ -1,4 +1,4 @@
-# go simple cron
+# go cron server
 
 ### dev
 
