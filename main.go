@@ -16,8 +16,6 @@ type Cmd struct {
 	Script string
 	Dir    string
 	Spec   string
-	Server string
-	Enable bool
 }
 
 type RespAdd struct {
@@ -53,7 +51,7 @@ type RespListCmd struct {
 var OK = 1
 var ERR = 0
 var ServerUri = "127.0.0.1:1234"
-var PING = time.Second
+var Ping = time.Second
 var CodeSuccess = 0
 var Success = "success"
 
@@ -64,9 +62,7 @@ type Client struct {
 	ListCmd []Job
 }
 
-type Server struct {
-	Clients map[string]Client
-}
+type Server struct{}
 
 var Clients = make(map[string]Client)
 
@@ -95,15 +91,14 @@ func (server *Server) Add(uri string, respAdd *RespAdd) error {
 		return errors.New("add client failed")
 	}
 	Clients[uri] = Client{Uri: uri, Client: conn, Status: OK}
-	server.Clients = Clients
 	respAdd.Msg = Success
 	return nil
 }
 
 func (server *Server) ping() {
 	for {
-		time.Sleep(PING)
-		for _, client := range server.Clients {
+		time.Sleep(Ping)
+		for _, client := range Clients {
 			go func(client Client) {
 				respPing := new(RespPing)
 				ping := client.Client.Go("Client.Ping", "", respPing, nil)
