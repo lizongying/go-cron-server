@@ -1,0 +1,11 @@
+api:
+  uri: 127.0.0.1:8080
+  mode: debug
+server:
+  uri: 127.0.0.1:1234
+  ping: 1
+mongo:
+  uri: mongodb://b-mysql-core17:27017,b-mysql-core18:27017,b-mysql-core19:27017
+  database: snkrs_bot
+log:
+  filename: /Users/lizongying/Temp/log/cron_server.log

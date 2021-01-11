@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"go-cron-server/app"
 	"io"
 	"log"
 	"net"
@@ -18,24 +19,25 @@ type Cmd struct {
 	Spec   string
 }
 
-type RespAdd struct {
+type RespCommon struct {
 	Code int
 	Msg  string
+}
+
+type RespAdd struct {
+	RespCommon
 }
 
 type RespPing struct {
-	Code int
-	Msg  string
+	RespCommon
 }
 
 type RespAddCmd struct {
-	Code int
-	Msg  string
+	RespCommon
 }
 
 type RespRemoveCmd struct {
-	Code int
-	Msg  string
+	RespCommon
 }
 
 type Job struct {
@@ -43,8 +45,7 @@ type Job struct {
 }
 
 type RespListCmd struct {
-	Code int
-	Msg  string
+	RespCommon
 	Data []Job
 }
 
@@ -136,7 +137,12 @@ var (
 )
 
 func init() {
-	logFile, err := os.OpenFile("cron.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	app.InitConfig()
+	mongo := app.Conf.Mongo
+	app.InitMongo(mongo)
+	ServerUri = app.Conf.Server.Uri
+	Ping = time.Duration(app.Conf.Server.Ping) * time.Minute
+	logFile, err := os.OpenFile(app.Conf.Log.Filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
 		log.Fatalln("open log file failed")
 	}
