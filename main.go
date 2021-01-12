@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
 	"go-cron-server/app"
 	"io"
 	"log"
@@ -9,6 +12,9 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -17,6 +23,7 @@ type Cmd struct {
 	Script string
 	Dir    string
 	Spec   string
+	Group  string
 }
 
 type RespCommon struct {
@@ -41,7 +48,11 @@ type RespRemoveCmd struct {
 }
 
 type Job struct {
-	Script string
+	Id     int    `json:"id"`
+	Script string `json:"script"`
+	Dir    string `json:"dir"`
+	Spec   string `json:"spec"`
+	Group  string `json:"group"`
 }
 
 type RespListCmd struct {
@@ -49,18 +60,44 @@ type RespListCmd struct {
 	Data []Job
 }
 
+type ReqListAll struct {
+	ClientName string `json:"client_name"`
+}
+
+type ReqAddCmd struct {
+	Id     int    `json:"id" binding:"required"`
+	Script string `json:"script" binding:"required"`
+	Dir    string `json:"dir"`
+	Spec   string `json:"spec" binding:"required"`
+	Group  string `json:"group"`
+}
+
+type ReqRemoveCmd struct {
+	Id int `json:"id" binding:"required"`
+}
+
 var OK = 1
 var ERR = 0
 var ServerUri = "127.0.0.1:1234"
 var Ping = time.Second
 var CodeSuccess = 0
+var CodeError = 1
 var Success = "success"
+var MsgError = "error"
+var ApiUri = ""
+var ApiMode = ""
 
 type Client struct {
 	Uri     string
+	Name    string
 	Client  *rpc.Client
 	Status  int
 	ListCmd []Job
+}
+
+type ClientInfo struct {
+	Uri  string `yaml:"uri" json:"-"`
+	Name string `yaml:"name" json:"-"`
 }
 
 type Server struct{}
@@ -85,49 +122,49 @@ func (server *Server) run() {
 	}()
 }
 
-func (server *Server) Add(uri string, respAdd *RespAdd) error {
-	conn, err := rpc.DialHTTP("tcp", uri)
+func (server *Server) Add(clientInfo ClientInfo, respAdd *RespAdd) error {
+	conn, err := rpc.DialHTTP("tcp", clientInfo.Uri)
 	if err != nil {
-		Error.Println("Add client failed")
+		Error.Println("Add client failed. client:", clientInfo.Name)
 		return errors.New("add client failed")
 	}
-	Clients[uri] = Client{Uri: uri, Client: conn, Status: OK}
+	Clients[clientInfo.Name] = Client{Uri: clientInfo.Uri, Name: clientInfo.Name, Client: conn, Status: OK}
 	respAdd.Msg = Success
+	Info.Println("Add client success. client:", clientInfo.Name)
 	return nil
 }
 
 func (server *Server) ping() {
-	for {
-		time.Sleep(Ping)
-		for _, client := range Clients {
-			go func(client Client) {
-				respPing := new(RespPing)
-				ping := client.Client.Go("Client.Ping", "", respPing, nil)
-				replyCall := <-ping.Done
-				if replyCall.Error != nil {
-					client.Status = ERR
-					Error.Println("Ping failed:", client.Uri, replyCall.Error)
-					go func(client Client) {
-						respAdd := new(RespAdd)
-						add := client.Client.Go("Client.Add", "", respAdd, nil)
-						replyCall := <-add.Done
-						if replyCall.Error != nil {
-							client.Status = ERR
-							Error.Println("Add failed:", client.Uri, replyCall.Error)
-							return
-						}
-						Info.Println(respPing.Msg)
-						if respAdd.Code == CodeSuccess {
+	go func() {
+		for {
+			time.Sleep(Ping)
+			for _, client := range Clients {
+				go func(client Client) {
+					respPing := new(RespPing)
+					ping := client.Client.Go("Client.Ping", "", respPing, nil)
+					replyCall := <-ping.Done
+					if replyCall.Error != nil || respPing.Code == CodeError {
+						client.Status = ERR
+						Error.Println("Ping failed. client:", client.Name, replyCall.Error)
+						go func(client Client) {
+							respAdd := new(RespAdd)
+							add := client.Client.Go("Client.Add", "", respAdd, nil)
+							replyCall := <-add.Done
+							if replyCall.Error != nil || respAdd.Code == CodeError {
+								client.Status = ERR
+								Error.Println("Add client failed. client:", client.Name, replyCall.Error)
+								return
+							}
 							client.Status = OK
-						}
-						Info.Println("add success")
-					}(client)
-					return
-				}
-				Info.Println(respPing.Msg)
-			}(client)
+							Info.Println("Add client success. client:", client.Name)
+						}(client)
+						return
+					}
+					//Info.Println("Ping ok. client:", client.Name)
+				}(client)
+			}
 		}
-	}
+	}()
 }
 
 var (
@@ -141,7 +178,9 @@ func init() {
 	mongo := app.Conf.Mongo
 	app.InitMongo(mongo)
 	ServerUri = app.Conf.Server.Uri
-	Ping = time.Duration(app.Conf.Server.Ping) * time.Minute
+	ApiUri = app.Conf.Api.Uri
+	ApiMode = app.Conf.Api.Mode
+	Ping = time.Duration(app.Conf.Server.Ping) * time.Second
 	logFile, err := os.OpenFile(app.Conf.Log.Filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
 		log.Fatalln("open log file failed")
@@ -155,51 +194,178 @@ func main() {
 	server := new(Server)
 	server.run()
 	server.ping()
-	//TODO
-	//cmd := &Cmd{Id: 1, Script: "sleep 100", Spec: "* * * * *"}
-}
-func AddCmd(client Client) {
-	respAddCmd := new(RespAddCmd)
-	addCmd := client.Client.Go("Client.AddCmd", nil, respAddCmd, nil)
-	replyCall := <-addCmd.Done
-	if replyCall.Error != nil {
-		Error.Println("Add failed:", client.Uri, replyCall.Error)
-		return
+
+	gin.SetMode(ApiMode)
+	r := gin.New()
+	r.Use(cors.Default())
+
+	r.POST("/api/cron/list_all", func(c *gin.Context) {
+		var req ReqListAll
+		if err := c.BindJSON(&req); err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"code": CodeError,
+				"msg":  MsgError,
+			})
+			return
+		}
+		res, err := ListAll(&req)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"code": CodeError,
+				"msg":  MsgError,
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"code": CodeSuccess,
+			"data": res,
+		})
+	})
+
+	r.POST("/api/cron/add", func(c *gin.Context) {
+		var req ReqAddCmd
+		if err := c.BindJSON(&req); err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"code": CodeError,
+			})
+			return
+		}
+		res, err := AddCmd(&req)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"code": CodeError,
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"code": CodeSuccess,
+			"data": res,
+		})
+	})
+
+	r.POST("/api/cron/remove", func(c *gin.Context) {
+		var req ReqRemoveCmd
+		if err := c.BindJSON(&req); err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"code": CodeError,
+			})
+			return
+		}
+		res, err := RemoveCmd(&req)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"code": CodeError,
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"code": CodeSuccess,
+			"data": res,
+		})
+	})
+
+	if err := r.Run(ApiUri); err != nil {
+		log.Fatalln(err)
 	}
-	Info.Println(respAddCmd.Msg)
-	if respAddCmd.Code == CodeSuccess {
-		Info.Println("Add success:", client.Uri)
+
+	srv := &http.Server{
+		Addr:    ApiUri,
+		Handler: r,
 	}
-	Info.Println("Add success:", client.Uri)
+
+	// Initializing the server in a goroutine so that
+	// it won't block the graceful shutdown handling below
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("listen: %s\n", err)
+		}
+	}()
+
+	// Wait for interrupt signal to gracefully shutdown the server with
+	// a timeout of 5 seconds.
+	quit := make(chan os.Signal)
+	// kill (no param) default send syscall.SIGTERM
+	// kill -2 is syscall.SIGINT
+	// kill -9 is syscall.SIGKILL but can't be catch, so don't need add it
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutting down server...")
+
+	// The context is used to inform the server it has 5 seconds to finish
+	// the request it is currently handling
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatal("Server forced to shutdown:", err)
+	}
+
+	log.Println("Server exiting")
 }
 
-func RemoveCmd(client Client) {
-	respRemoveCmd := new(RespRemoveCmd)
-	removeCmd := client.Client.Go("Client.RemoveCmd", nil, respRemoveCmd, nil)
-	replyCall := <-removeCmd.Done
-	if replyCall.Error != nil {
-		Error.Println("Remove failed:", client.Uri, replyCall.Error)
-		return
-	}
-	Info.Println(respRemoveCmd.Msg)
-	if respRemoveCmd.Code == CodeSuccess {
-		Info.Println("Remove success:", client.Uri)
-	}
-	Info.Println("Remove success:", client.Uri)
-}
-
-func ListCmd(client Client) {
-	respListCmd := new(RespListCmd)
-	listCmd := client.Client.Go("Client.ListCmd", nil, respListCmd, nil)
-	replyCall := <-listCmd.Done
-	if replyCall.Error != nil {
-		Error.Println("List failed:", client.Uri, replyCall.Error)
-		return
-	}
-	Info.Println(respListCmd.Msg)
-	if respListCmd.Code == CodeSuccess {
+func ListAll(req *ReqListAll) (resp map[string][]Job, err error) {
+	var wg sync.WaitGroup
+	resp = make(map[string][]Job)
+	for clientName, client := range Clients {
+		if req.ClientName != "" && req.ClientName != clientName {
+			continue
+		}
+		respListCmd := new(RespListCmd)
+		listCmd := client.Client.Go("Client.ListCmd", "", respListCmd, nil)
+		replyCall := <-listCmd.Done
+		if replyCall.Error != nil || respListCmd.Code == CodeError {
+			Error.Println("Client list failed. client:", client.Name, replyCall.Error)
+			continue
+		}
 		client.ListCmd = respListCmd.Data
-		Info.Println("List success:", client.ListCmd)
+		resp[clientName] = respListCmd.Data
+		Info.Println("Client list success. client:", client.Name)
 	}
-	Info.Println("List success:", client.ListCmd)
+	wg.Wait()
+	return resp, nil
+}
+
+func AddCmd(req *ReqAddCmd) (resp map[string]bool, err error) {
+	var wg sync.WaitGroup
+	resp = make(map[string]bool)
+	cmd := Cmd{
+		Id:     req.Id,
+		Script: req.Script,
+		Dir:    req.Dir,
+		Spec:   req.Spec,
+		Group:  req.Group,
+	}
+	for clientName, client := range Clients {
+		respAddCmd := new(RespAddCmd)
+		addCmd := client.Client.Go("Client.AddCmd", cmd, respAddCmd, nil)
+		replyCall := <-addCmd.Done
+		if replyCall.Error != nil || respAddCmd.Code == CodeError {
+			Error.Println("Client add failed. client:", client.Name, replyCall.Error)
+			continue
+		}
+		resp[clientName] = true
+		Info.Println("Client add success. client:", client.Name)
+	}
+	wg.Wait()
+	return resp, nil
+}
+
+func RemoveCmd(req *ReqRemoveCmd) (resp map[string]bool, err error) {
+	var wg sync.WaitGroup
+	resp = make(map[string]bool)
+	cmd := Cmd{
+		Id: req.Id,
+	}
+	for clientName, client := range Clients {
+		respRemoveCmd := new(RespRemoveCmd)
+		removeCmd := client.Client.Go("Client.RemoveCmd", cmd, respRemoveCmd, nil)
+		replyCall := <-removeCmd.Done
+		if replyCall.Error != nil || respRemoveCmd.Code == CodeError {
+			Error.Println("Client remove failed. client:", client.Name, replyCall.Error)
+			continue
+		}
+		resp[clientName] = true
+		Info.Println("Client remove success. client:", client.Name)
+	}
+	wg.Wait()
+	return resp, nil
 }

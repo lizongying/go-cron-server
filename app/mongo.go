@@ -7,7 +7,6 @@ import (
 	"log"
 )
 
-var MongoClient *mongo.Client
 var MongoDatabase *mongo.Database
 
 func InitMongo(mongoParam *Mongo) {
@@ -27,8 +26,5 @@ func InitMongo(mongoParam *Mongo) {
 		log.Fatalln(err)
 	}
 
-	MongoClient = client
-	log.Println(MongoClient)
 	MongoDatabase = client.Database(mongoParam.Database)
-	log.Println(MongoDatabase)
 }
