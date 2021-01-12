@@ -8,4 +8,4 @@ mongo:
   uri:
   database:
 log:
-  filename: /Users/lizongying/Temp/log/cron_server.log
+  filename: cron_server.log
