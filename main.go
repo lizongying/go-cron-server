@@ -155,6 +155,7 @@ func main() {
 	server := new(Server)
 	server.run()
 	server.ping()
+	//TODO
 	//cmd := &Cmd{Id: 1, Script: "sleep 100", Spec: "* * * * *"}
 }
 func AddCmd(client Client) {
