@@ -106,6 +106,7 @@ var Success = "success"
 var MsgError = "error"
 var ApiUri = ""
 var ApiMode = ""
+var Collection = ""
 
 var Clients = make(map[string]Client)
 
@@ -118,7 +119,10 @@ var (
 func init() {
 	app.InitConfig()
 	mongo := app.Conf.Mongo
-	app.InitMongo(mongo)
+	Collection = mongo.Collection
+	if mongo.Uri != "" {
+		app.InitMongo(mongo)
+	}
 	ServerUri = app.Conf.Server.Uri
 	ApiUri = app.Conf.Api.Uri
 	ApiMode = app.Conf.Api.Mode
@@ -269,6 +273,7 @@ func (server *Server) Add(clientInfo ClientInfo, respAdd *RespAdd) error {
 		return errors.New("add client failed")
 	}
 	Clients[clientInfo.Name] = Client{Uri: clientInfo.Uri, Name: clientInfo.Name, Client: conn, Status: OK}
+	respAdd.Code = CodeSuccess
 	respAdd.Msg = Success
 	//Info.Println("Add client success. client:", clientInfo.Name)
 	return nil
@@ -366,6 +371,7 @@ func RemoveCmd(req *ReqRemoveCmd) (resp map[string]bool, err error) {
 		removeCmd := client.Client.Go("Client.RemoveCmd", cmd, respRemoveCmd, nil)
 		replyCall := <-removeCmd.Done
 		if replyCall.Error != nil || respRemoveCmd.Code == CodeError {
+			resp[clientName] = false
 			Error.Println("Client remove failed. client:", client.Name, replyCall.Error)
 			continue
 		}

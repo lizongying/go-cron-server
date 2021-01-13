@@ -22,8 +22,9 @@ type Server struct {
 }
 
 type Mongo struct {
-	Uri      string `yaml:"uri" json:"-"`
-	Database string `yaml:"database" json:"-"`
+	Uri        string `yaml:"uri" json:"-"`
+	Database   string `yaml:"database" json:"-"`
+	Collection string `yaml:"collection" json:"-"`
 }
 
 type Log struct {

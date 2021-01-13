@@ -7,5 +7,6 @@ server:
 mongo:
   uri:
   database:
+  collection:
 log:
   filename: cron_server.log
