@@ -3,6 +3,7 @@ api:
   mode: release
 server:
   uri: 127.0.0.1:1234
+  name: "server_one"
   interval: 1
 mongo:
   uri:

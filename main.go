@@ -69,15 +69,17 @@ type ReqListAll struct {
 }
 
 type ReqAddCmd struct {
-	Id     int    `json:"id" binding:"required"`
-	Script string `json:"script" binding:"required"`
-	Dir    string `json:"dir"`
-	Spec   string `json:"spec" binding:"required"`
-	Group  string `json:"group"`
+	Id         int    `json:"id" binding:"required"`
+	Script     string `json:"script" binding:"required"`
+	Dir        string `json:"dir"`
+	Spec       string `json:"spec" binding:"required"`
+	Group      string `json:"group"`
+	ClientName string `json:"client_name"`
 }
 
 type ReqRemoveCmd struct {
-	Id int `json:"id" binding:"required"`
+	Id         int    `json:"id" binding:"required"`
+	ClientName string `json:"client_name"`
 }
 
 type Client struct {
@@ -85,7 +87,7 @@ type Client struct {
 	Name    string
 	Client  *rpc.Client
 	Status  int
-	ListCmd []Job
+	ListCmd map[int]Job
 }
 
 type ClientInfo struct {
@@ -108,7 +110,7 @@ var ApiUri = ""
 var ApiMode = ""
 var Collection = ""
 
-var Clients = make(map[string]Client)
+var Clients = make(map[string]*Client)
 
 var (
 	Info    *log.Logger
@@ -267,15 +269,39 @@ func (server *Server) run() {
 }
 
 func (server *Server) Add(clientInfo ClientInfo, respAdd *RespAdd) error {
+	if Clients[clientInfo.Name] != nil && Clients[clientInfo.Name].Status == OK {
+		respAdd.Code = CodeSuccess
+		respAdd.Msg = Success
+		//Info.Println("Add client success. client:", clientInfo.Name)
+		return nil
+	}
 	conn, err := rpc.DialHTTP("tcp", clientInfo.Uri)
 	if err != nil {
 		Error.Println("Add client failed. client:", clientInfo.Name)
 		return errors.New("add client failed")
 	}
-	Clients[clientInfo.Name] = Client{Uri: clientInfo.Uri, Name: clientInfo.Name, Client: conn, Status: OK}
+	if Clients[clientInfo.Name] == nil {
+		Clients[clientInfo.Name] = &Client{Uri: clientInfo.Uri, Name: clientInfo.Name, Client: conn, Status: OK, ListCmd: make(map[int]Job)}
+	} else {
+		Clients[clientInfo.Name] = &Client{Uri: clientInfo.Uri, Name: clientInfo.Name, Client: conn, Status: OK, ListCmd: Clients[clientInfo.Name].ListCmd}
+		for _, cmd := range Clients[clientInfo.Name].ListCmd {
+			req := ReqAddCmd{
+				Id:         cmd.Id,
+				Script:     cmd.Script,
+				Dir:        cmd.Dir,
+				Spec:       cmd.Spec,
+				Group:      cmd.Group,
+				ClientName: clientInfo.Name,
+			}
+			_, err := AddCmd(&req)
+			if err != nil {
+				Error.Println("Add cmd failed. client:", clientInfo.Name)
+			}
+		}
+	}
 	respAdd.Code = CodeSuccess
 	respAdd.Msg = Success
-	//Info.Println("Add client success. client:", clientInfo.Name)
+	Info.Println("Add client success. client:", clientInfo.Name)
 	return nil
 }
 
@@ -284,16 +310,16 @@ func (server *Server) pingClient() {
 		for {
 			time.Sleep(Interval)
 			for _, client := range Clients {
-				go func(client Client) {
+				go func(client *Client) {
 					respPing := new(RespPing)
-					ping := client.Client.Go("Client.Ping", "", respPing, nil)
+					ping := client.Client.Go("Client.Ping", "Server", respPing, nil)
 					replyCall := <-ping.Done
 					if replyCall.Error != nil || respPing.Code == CodeError {
 						client.Status = ERR
 						Error.Println("Ping failed. client:", client.Name, replyCall.Error)
-						go func(client Client) {
+						go func(client *Client) {
 							respAdd := new(RespAdd)
-							add := client.Client.Go("Client.Add", "", respAdd, nil)
+							add := client.Client.Go("Client.Add", "Server", respAdd, nil)
 							replyCall := <-add.Done
 							if replyCall.Error != nil || respAdd.Code == CodeError {
 								client.Status = ERR
@@ -312,6 +338,13 @@ func (server *Server) pingClient() {
 	}()
 }
 
+func (server *Server) Ping(args string, respPing *RespPing) error {
+	//Info.Println("Ping ok. client:", ClientInfo.Name)
+	respPing.Code = CodeSuccess
+	respPing.Msg = Success
+	return nil
+}
+
 func ListAll(req *ReqListAll) (resp map[string][]Job, err error) {
 	var wg sync.WaitGroup
 	resp = make(map[string][]Job)
@@ -326,7 +359,9 @@ func ListAll(req *ReqListAll) (resp map[string][]Job, err error) {
 			Error.Println("Client list failed. client:", client.Name, replyCall.Error)
 			continue
 		}
-		client.ListCmd = respListCmd.Data
+		for _, data := range respListCmd.Data {
+			client.ListCmd[data.Id] = data
+		}
 		resp[clientName] = respListCmd.Data
 		Info.Println("Client list success. client:", client.Name)
 	}
@@ -345,6 +380,9 @@ func AddCmd(req *ReqAddCmd) (resp map[string]bool, err error) {
 		Group:  req.Group,
 	}
 	for clientName, client := range Clients {
+		if req.ClientName != "" && req.ClientName != clientName {
+			continue
+		}
 		respAddCmd := new(RespAddCmd)
 		addCmd := client.Client.Go("Client.AddCmd", cmd, respAddCmd, nil)
 		replyCall := <-addCmd.Done
@@ -354,6 +392,15 @@ func AddCmd(req *ReqAddCmd) (resp map[string]bool, err error) {
 			continue
 		}
 		resp[clientName] = true
+		if Clients[clientName].ListCmd[req.Id].Id == 0 {
+			Clients[clientName].ListCmd[req.Id] = Job{
+				Id:     req.Id,
+				Script: req.Script,
+				Dir:    req.Dir,
+				Spec:   req.Spec,
+				Group:  req.Group,
+			}
+		}
 		Info.Println("Client add success. client:", client.Name)
 	}
 	wg.Wait()
@@ -367,6 +414,9 @@ func RemoveCmd(req *ReqRemoveCmd) (resp map[string]bool, err error) {
 		Id: req.Id,
 	}
 	for clientName, client := range Clients {
+		if req.ClientName != "" && req.ClientName != clientName {
+			continue
+		}
 		respRemoveCmd := new(RespRemoveCmd)
 		removeCmd := client.Client.Go("Client.RemoveCmd", cmd, respRemoveCmd, nil)
 		replyCall := <-removeCmd.Done
@@ -376,6 +426,7 @@ func RemoveCmd(req *ReqRemoveCmd) (resp map[string]bool, err error) {
 			continue
 		}
 		resp[clientName] = true
+		delete(Clients[clientName].ListCmd, req.Id)
 		Info.Println("Client remove success. client:", client.Name)
 	}
 	wg.Wait()
