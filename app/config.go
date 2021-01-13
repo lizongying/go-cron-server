@@ -17,8 +17,8 @@ type Api struct {
 }
 
 type Server struct {
-	Uri  string `yaml:"uri" json:"-"`
-	Ping int    `yaml:"ping" json:"-"`
+	Uri      string `yaml:"uri" json:"-"`
+	Interval int    `yaml:"interval" json:"-"`
 }
 
 type Mongo struct {

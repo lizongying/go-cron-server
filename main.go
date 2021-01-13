@@ -53,6 +53,10 @@ type Job struct {
 	Dir    string `json:"dir"`
 	Spec   string `json:"spec"`
 	Group  string `json:"group"`
+	Prev   string `json:"prev"`
+	Next   string `json:"next"`
+	Pid    int    `json:"pid"`
+	State  string `json:"state"`
 }
 
 type RespListCmd struct {
@@ -76,17 +80,6 @@ type ReqRemoveCmd struct {
 	Id int `json:"id" binding:"required"`
 }
 
-var OK = 1
-var ERR = 0
-var ServerUri = "127.0.0.1:1234"
-var Ping = time.Second
-var CodeSuccess = 0
-var CodeError = 1
-var Success = "success"
-var MsgError = "error"
-var ApiUri = ""
-var ApiMode = ""
-
 type Client struct {
 	Uri     string
 	Name    string
@@ -96,76 +89,25 @@ type Client struct {
 }
 
 type ClientInfo struct {
-	Uri  string `yaml:"uri" json:"-"`
-	Name string `yaml:"name" json:"-"`
+	Uri   string `yaml:"uri" json:"-"`
+	Name  string `yaml:"name" json:"-"`
+	Group string `yaml:"group" json:"-"`
 }
 
 type Server struct{}
 
+var OK = 1
+var ERR = 0
+var ServerUri = "127.0.0.1:1234"
+var Interval = time.Second
+var CodeSuccess = 0
+var CodeError = 1
+var Success = "success"
+var MsgError = "error"
+var ApiUri = ""
+var ApiMode = ""
+
 var Clients = make(map[string]Client)
-
-func (server *Server) run() {
-	if err := rpc.Register(server); err != nil {
-		Error.Println("Server register failed")
-		return
-	}
-	rpc.HandleHTTP()
-	listen, err := net.Listen("tcp", ServerUri)
-	if err != nil {
-		Error.Println("Server listen failed")
-		return
-	}
-	go func() {
-		if err = http.Serve(listen, nil); err != nil {
-			Error.Println("Server failed")
-		}
-	}()
-}
-
-func (server *Server) Add(clientInfo ClientInfo, respAdd *RespAdd) error {
-	conn, err := rpc.DialHTTP("tcp", clientInfo.Uri)
-	if err != nil {
-		Error.Println("Add client failed. client:", clientInfo.Name)
-		return errors.New("add client failed")
-	}
-	Clients[clientInfo.Name] = Client{Uri: clientInfo.Uri, Name: clientInfo.Name, Client: conn, Status: OK}
-	respAdd.Msg = Success
-	Info.Println("Add client success. client:", clientInfo.Name)
-	return nil
-}
-
-func (server *Server) ping() {
-	go func() {
-		for {
-			time.Sleep(Ping)
-			for _, client := range Clients {
-				go func(client Client) {
-					respPing := new(RespPing)
-					ping := client.Client.Go("Client.Ping", "", respPing, nil)
-					replyCall := <-ping.Done
-					if replyCall.Error != nil || respPing.Code == CodeError {
-						client.Status = ERR
-						Error.Println("Ping failed. client:", client.Name, replyCall.Error)
-						go func(client Client) {
-							respAdd := new(RespAdd)
-							add := client.Client.Go("Client.Add", "", respAdd, nil)
-							replyCall := <-add.Done
-							if replyCall.Error != nil || respAdd.Code == CodeError {
-								client.Status = ERR
-								Error.Println("Add client failed. client:", client.Name, replyCall.Error)
-								return
-							}
-							client.Status = OK
-							Info.Println("Add client success. client:", client.Name)
-						}(client)
-						return
-					}
-					//Info.Println("Ping ok. client:", client.Name)
-				}(client)
-			}
-		}
-	}()
-}
 
 var (
 	Info    *log.Logger
@@ -180,7 +122,7 @@ func init() {
 	ServerUri = app.Conf.Server.Uri
 	ApiUri = app.Conf.Api.Uri
 	ApiMode = app.Conf.Api.Mode
-	Ping = time.Duration(app.Conf.Server.Ping) * time.Second
+	Interval = time.Duration(app.Conf.Server.Interval) * time.Second
 	logFile, err := os.OpenFile(app.Conf.Log.Filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
 		log.Fatalln("open log file failed")
@@ -193,7 +135,7 @@ func init() {
 func main() {
 	server := new(Server)
 	server.run()
-	server.ping()
+	server.pingClient()
 
 	gin.SetMode(ApiMode)
 	r := gin.New()
@@ -302,6 +244,69 @@ func main() {
 	log.Println("Server exiting")
 }
 
+func (server *Server) run() {
+	if err := rpc.Register(server); err != nil {
+		Error.Println("Server register failed")
+		return
+	}
+	rpc.HandleHTTP()
+	listen, err := net.Listen("tcp", ServerUri)
+	if err != nil {
+		Error.Println("Server listen failed")
+		return
+	}
+	go func() {
+		if err = http.Serve(listen, nil); err != nil {
+			Error.Println("Server failed")
+		}
+	}()
+}
+
+func (server *Server) Add(clientInfo ClientInfo, respAdd *RespAdd) error {
+	conn, err := rpc.DialHTTP("tcp", clientInfo.Uri)
+	if err != nil {
+		Error.Println("Add client failed. client:", clientInfo.Name)
+		return errors.New("add client failed")
+	}
+	Clients[clientInfo.Name] = Client{Uri: clientInfo.Uri, Name: clientInfo.Name, Client: conn, Status: OK}
+	respAdd.Msg = Success
+	//Info.Println("Add client success. client:", clientInfo.Name)
+	return nil
+}
+
+func (server *Server) pingClient() {
+	go func() {
+		for {
+			time.Sleep(Interval)
+			for _, client := range Clients {
+				go func(client Client) {
+					respPing := new(RespPing)
+					ping := client.Client.Go("Client.Ping", "", respPing, nil)
+					replyCall := <-ping.Done
+					if replyCall.Error != nil || respPing.Code == CodeError {
+						client.Status = ERR
+						Error.Println("Ping failed. client:", client.Name, replyCall.Error)
+						go func(client Client) {
+							respAdd := new(RespAdd)
+							add := client.Client.Go("Client.Add", "", respAdd, nil)
+							replyCall := <-add.Done
+							if replyCall.Error != nil || respAdd.Code == CodeError {
+								client.Status = ERR
+								Error.Println("Add client failed. client:", client.Name, replyCall.Error)
+								return
+							}
+							client.Status = OK
+							Info.Println("Add client success. client:", client.Name)
+						}(client)
+						return
+					}
+					//Info.Println("Ping ok. client:", client.Name)
+				}(client)
+			}
+		}
+	}()
+}
+
 func ListAll(req *ReqListAll) (resp map[string][]Job, err error) {
 	var wg sync.WaitGroup
 	resp = make(map[string][]Job)
@@ -339,6 +344,7 @@ func AddCmd(req *ReqAddCmd) (resp map[string]bool, err error) {
 		addCmd := client.Client.Go("Client.AddCmd", cmd, respAddCmd, nil)
 		replyCall := <-addCmd.Done
 		if replyCall.Error != nil || respAddCmd.Code == CodeError {
+			resp[clientName] = false
 			Error.Println("Client add failed. client:", client.Name, replyCall.Error)
 			continue
 		}
