@@ -497,6 +497,7 @@ func CmdRemove(req *ReqCmdRemove) (resp map[string]bool, err error) {
 		replyCall := <-cmdRemove.Done
 		if replyCall.Error != nil || respCmdRemove.Code == CodeError {
 			resp[clientName] = false
+			delete(Clients[clientName].ListCmd, req.Id)
 			Error.Println("Cmd remove failed. client:", client.Name, replyCall.Error)
 			continue
 		}
