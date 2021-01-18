@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"go-cron-server/app"
@@ -419,9 +418,6 @@ func CmdList(req *ReqCmdList) (resp map[string][]Job, err error) {
 	for clientName, client := range Clients {
 		if req.ClientName != "" && req.ClientName != clientName {
 			continue
-		}
-		for _, data := range client.ListCmd {
-			fmt.Println(1111, data)
 		}
 		respCmdList := new(RespCmdList)
 		listCmd := client.Client.Go("Client.CmdList", "", respCmdList, nil)
