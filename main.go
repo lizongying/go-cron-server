@@ -167,6 +167,9 @@ func main() {
 	gin.SetMode(ApiMode)
 	r := gin.New()
 	r.Use(cors.Default())
+	r.StaticFile("/", "./dist/index.html")
+	r.StaticFile("/favicon.ico", "./dist/favicon.ico")
+	r.Static("/static", "./dist/static")
 
 	r.POST("/api/cron/list", func(c *gin.Context) {
 		var req ReqCmdList
