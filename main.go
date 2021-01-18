@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"go-cron-server/app"
@@ -66,6 +67,14 @@ type RespCmdRemove struct {
 	RespCommon
 }
 
+type RespCmdStart struct {
+	RespCommon
+}
+
+type RespCmdStop struct {
+	RespCommon
+}
+
 type ReqCmdList struct {
 	ClientName string `json:"client_name"`
 }
@@ -85,12 +94,22 @@ type ReqCmdRemove struct {
 	ClientName string `json:"client_name"`
 }
 
+type ReqCmdStart struct {
+	Id         int    `json:"id" binding:"required"`
+	ClientName string `json:"client_name"`
+}
+
+type ReqCmdStop struct {
+	Id         int    `json:"id" binding:"required"`
+	ClientName string `json:"client_name"`
+}
+
 type Client struct {
 	Uri     string
 	Name    string
 	Client  *rpc.Client
 	Status  int
-	ListCmd map[int]Job
+	ListCmd map[int]*Job
 }
 
 type ClientInfo struct {
@@ -215,6 +234,48 @@ func main() {
 		})
 	})
 
+	r.POST("/api/cron/start", func(c *gin.Context) {
+		var req ReqCmdStart
+		if err := c.BindJSON(&req); err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"code": CodeError,
+			})
+			return
+		}
+		res, err := CmdStart(&req)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"code": CodeError,
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"code": CodeSuccess,
+			"data": res,
+		})
+	})
+
+	r.POST("/api/cron/stop", func(c *gin.Context) {
+		var req ReqCmdStop
+		if err := c.BindJSON(&req); err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"code": CodeError,
+			})
+			return
+		}
+		res, err := CmdStop(&req)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"code": CodeError,
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"code": CodeSuccess,
+			"data": res,
+		})
+	})
+
 	if err := r.Run(ApiUri); err != nil {
 		log.Fatalln(err)
 	}
@@ -280,14 +341,17 @@ func (server *Server) ClientAdd(clientInfo ClientInfo, respClientAdd *RespClient
 	}
 	conn, err := rpc.DialHTTP("tcp", clientInfo.Uri)
 	if err != nil {
-		Error.Println("Add client failed. client:", clientInfo.Name)
-		return errors.New("add client failed")
+		Error.Println("Client add failed. client:", clientInfo.Name)
+		return errors.New("client add failed")
 	}
 	if Clients[clientInfo.Name] == nil {
-		Clients[clientInfo.Name] = &Client{Uri: clientInfo.Uri, Name: clientInfo.Name, Client: conn, Status: OK, ListCmd: make(map[int]Job)}
+		Clients[clientInfo.Name] = &Client{Uri: clientInfo.Uri, Name: clientInfo.Name, Client: conn, Status: OK, ListCmd: make(map[int]*Job)}
 	} else {
 		Clients[clientInfo.Name] = &Client{Uri: clientInfo.Uri, Name: clientInfo.Name, Client: conn, Status: OK, ListCmd: Clients[clientInfo.Name].ListCmd}
 		for _, cmd := range Clients[clientInfo.Name].ListCmd {
+			if !cmd.Enable {
+				continue
+			}
 			req := ReqCmdAdd{
 				Id:         cmd.Id,
 				Script:     cmd.Script,
@@ -299,13 +363,13 @@ func (server *Server) ClientAdd(clientInfo ClientInfo, respClientAdd *RespClient
 			}
 			_, err := CmdAdd(&req)
 			if err != nil {
-				Error.Println("Add cmd failed. client:", clientInfo.Name)
+				Error.Println("Cmd add failed. client:", clientInfo.Name)
 			}
 		}
 	}
 	respClientAdd.Code = CodeSuccess
 	respClientAdd.Msg = Success
-	Info.Println("Add client success. client:", clientInfo.Name)
+	Info.Println("Client add success. client:", clientInfo.Name)
 	return nil
 }
 
@@ -323,7 +387,7 @@ func (server *Server) clientPing() {
 						Error.Println("Ping failed. client:", client.Name, replyCall.Error)
 						go func(client *Client) {
 							respClientAdd := new(RespClientAdd)
-							clientAdd := client.Client.Go("Client.Add", "Server", respClientAdd, nil)
+							clientAdd := client.Client.Go("Client.ClientAdd", "Server", respClientAdd, nil)
 							replyCall := <-clientAdd.Done
 							if replyCall.Error != nil || respClientAdd.Code == CodeError {
 								client.Status = ERR
@@ -356,18 +420,23 @@ func CmdList(req *ReqCmdList) (resp map[string][]Job, err error) {
 		if req.ClientName != "" && req.ClientName != clientName {
 			continue
 		}
+		for _, data := range client.ListCmd {
+			fmt.Println(1111, data)
+		}
 		respCmdList := new(RespCmdList)
 		listCmd := client.Client.Go("Client.CmdList", "", respCmdList, nil)
 		replyCall := <-listCmd.Done
 		if replyCall.Error != nil || respCmdList.Code == CodeError {
-			Error.Println("Client list failed. client:", client.Name, replyCall.Error)
+			Error.Println("Cmd list failed. client:", client.Name, replyCall.Error)
 			continue
 		}
-		for _, data := range respCmdList.Data {
-			client.ListCmd[data.Id] = data
+		for i, data := range respCmdList.Data {
+			client.ListCmd[data.Id] = &respCmdList.Data[i]
 		}
-		resp[clientName] = respCmdList.Data
-		Info.Println("Client list success. client:", client.Name)
+		for _, data := range client.ListCmd {
+			resp[clientName] = append(resp[clientName], *data)
+		}
+		Info.Println("Cmd list success. client:", client.Name)
 	}
 	wg.Wait()
 	return resp, nil
@@ -389,16 +458,16 @@ func CmdAdd(req *ReqCmdAdd) (resp map[string]bool, err error) {
 			continue
 		}
 		respCmdAdd := new(RespCmdAdd)
-		cmdAdd := client.Client.Go("Client.AddCmd", cmd, respCmdAdd, nil)
+		cmdAdd := client.Client.Go("Client.CmdAdd", cmd, respCmdAdd, nil)
 		replyCall := <-cmdAdd.Done
 		if replyCall.Error != nil || respCmdAdd.Code == CodeError {
 			resp[clientName] = false
-			Error.Println("Client add failed. client:", client.Name, replyCall.Error)
+			Error.Println("Cmd add failed. client:", client.Name, replyCall.Error)
 			continue
 		}
 		resp[clientName] = true
-		if Clients[clientName].ListCmd[req.Id].Id == 0 {
-			Clients[clientName].ListCmd[req.Id] = Job{
+		if Clients[clientName].ListCmd[req.Id] == nil {
+			Clients[clientName].ListCmd[req.Id] = &Job{
 				Id:     req.Id,
 				Script: req.Script,
 				Dir:    req.Dir,
@@ -407,7 +476,7 @@ func CmdAdd(req *ReqCmdAdd) (resp map[string]bool, err error) {
 				Enable: req.Enable,
 			}
 		}
-		Info.Println("Client add success. client:", client.Name)
+		Info.Println("Cmd add success. client:", client.Name)
 	}
 	wg.Wait()
 	return resp, nil
@@ -428,11 +497,80 @@ func CmdRemove(req *ReqCmdRemove) (resp map[string]bool, err error) {
 		replyCall := <-cmdRemove.Done
 		if replyCall.Error != nil || respCmdRemove.Code == CodeError {
 			resp[clientName] = false
-			Error.Println("Client remove failed. client:", client.Name, replyCall.Error)
+			Error.Println("Cmd remove failed. client:", client.Name, replyCall.Error)
 			continue
 		}
 		resp[clientName] = true
 		delete(Clients[clientName].ListCmd, req.Id)
+		Info.Println("Cmd remove success. client:", client.Name)
+	}
+	wg.Wait()
+	return resp, nil
+}
+
+func CmdStart(req *ReqCmdStart) (resp map[string]bool, err error) {
+	var wg sync.WaitGroup
+	resp = make(map[string]bool)
+	cmd := Cmd{
+		Id: req.Id,
+	}
+	for clientName, client := range Clients {
+		if req.ClientName != "" && req.ClientName != clientName {
+			continue
+		}
+		for i, ii := range Clients[clientName].ListCmd {
+			if i != req.Id {
+				continue
+			}
+			cmd = Cmd{
+				Id:     req.Id,
+				Script: ii.Script,
+				Dir:    ii.Dir,
+				Spec:   ii.Spec,
+				Group:  ii.Group,
+				Enable: true,
+			}
+			break
+		}
+		if !cmd.Enable {
+			continue
+		}
+		respCmdAdd := new(RespCmdAdd)
+		cmdAdd := client.Client.Go("Client.CmdAdd", cmd, respCmdAdd, nil)
+		replyCall := <-cmdAdd.Done
+		if replyCall.Error != nil || respCmdAdd.Code == CodeError {
+			resp[clientName] = false
+			Error.Println("Cmd add failed. client:", client.Name, replyCall.Error)
+			continue
+		}
+		resp[clientName] = true
+		Clients[clientName].ListCmd[req.Id].Enable = true
+		Info.Println("Cmd add success. client:", client.Name)
+	}
+	wg.Wait()
+	return resp, nil
+}
+
+func CmdStop(req *ReqCmdStop) (resp map[string]bool, err error) {
+	var wg sync.WaitGroup
+	resp = make(map[string]bool)
+	cmd := Cmd{
+		Id: req.Id,
+	}
+	for clientName, client := range Clients {
+		if req.ClientName != "" && req.ClientName != clientName {
+			continue
+		}
+		respCmdRemove := new(RespCmdRemove)
+		cmdRemove := client.Client.Go("Client.CmdRemove", cmd, respCmdRemove, nil)
+		replyCall := <-cmdRemove.Done
+		if replyCall.Error != nil || respCmdRemove.Code == CodeError {
+			resp[clientName] = false
+			Error.Println("Client remove failed. client:", client.Name, replyCall.Error)
+			continue
+		}
+		resp[clientName] = true
+		Clients[clientName].ListCmd[req.Id].Enable = false
 		Info.Println("Client remove success. client:", client.Name)
 	}
 	wg.Wait()
