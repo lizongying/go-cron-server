@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/robfig/cron/v3"
 	"go-cron-server/app"
 	"io"
 	"log"
@@ -17,14 +18,6 @@ import (
 	"syscall"
 	"time"
 )
-
-type Cmd struct {
-	Id     int
-	Script string
-	Dir    string
-	Spec   string
-	Group  string
-}
 
 type RespCommon struct {
 	Code int
@@ -40,20 +33,23 @@ type RespClientPing struct {
 }
 
 type Job struct {
-	Id        int    `json:"id"`
-	Name      string `json:"name"`
-	Project   string `json:"project"`
-	Creator   string `json:"creator"`
-	CreatTime string `json:"creat_time"`
-	Script    string `json:"script"`
-	Dir       string `json:"dir"`
-	Spec      string `json:"spec"`
-	Group     string `json:"group"`
-	Enable    bool   `json:"enable"`
-	Prev      string `json:"prev"`
-	Next      string `json:"next"`
-	Pid       int    `json:"pid"`
-	State     string `json:"state"`
+	Id        int          `json:"id"`
+	Name      string       `json:"name"`
+	Project   string       `json:"project"`
+	Creator   string       `json:"creator"`
+	CreatTime string       `json:"creat_time"`
+	Enable    bool         `json:"enable"`
+	Server    string       `json:"server"`
+	Script    string       `json:"script"`
+	Dir       string       `json:"dir"`
+	Spec      string       `json:"spec"`
+	Group     string       `json:"group"`
+	Prev      string       `json:"prev"`
+	Next      string       `json:"next"`
+	Pid       int          `json:"pid"`
+	State     string       `json:"state"`
+	EntryID   cron.EntryID `json:"-"`
+	Md5       string       `json:"-"`
 }
 
 type RespJobList struct {
@@ -79,12 +75,11 @@ type ReqJobAdd struct {
 	Project   string `json:"project" binding:"required"`
 	Creator   string `json:"creator" binding:"required"`
 	CreatTime string `json:"creat_time" binding:"required"`
+	Server    string `json:"server"`
 	Script    string `json:"script" binding:"required"`
 	Dir       string `json:"dir"`
 	Spec      string `json:"spec" binding:"required"`
 	Group     string `json:"group"`
-	Enable    bool   `json:"enable"`
-	Server    string `json:"server"`
 }
 
 type ReqJobRemove struct {
@@ -170,7 +165,7 @@ func main() {
 	r.StaticFile("/favicon.ico", "./dist/favicon.ico")
 	r.Static("/static", "./dist/static")
 
-	r.POST("/api/cron/list", func(c *gin.Context) {
+	r.POST("/api/job/list", func(c *gin.Context) {
 		var req ReqJobList
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(http.StatusOK, gin.H{
@@ -193,7 +188,7 @@ func main() {
 		})
 	})
 
-	r.POST("/api/cron/add", func(c *gin.Context) {
+	r.POST("/api/job/add", func(c *gin.Context) {
 		var req ReqJobAdd
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(http.StatusOK, gin.H{
@@ -214,7 +209,7 @@ func main() {
 		})
 	})
 
-	r.POST("/api/cron/remove", func(c *gin.Context) {
+	r.POST("/api/job/remove", func(c *gin.Context) {
 		var req ReqJobRemove
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(http.StatusOK, gin.H{
@@ -235,7 +230,7 @@ func main() {
 		})
 	})
 
-	r.POST("/api/cron/start", func(c *gin.Context) {
+	r.POST("/api/job/start", func(c *gin.Context) {
 		var req ReqJobStart
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(http.StatusOK, gin.H{
@@ -256,7 +251,7 @@ func main() {
 		})
 	})
 
-	r.POST("/api/cron/stop", func(c *gin.Context) {
+	r.POST("/api/job/stop", func(c *gin.Context) {
 		var req ReqJobStop
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(http.StatusOK, gin.H{
@@ -359,12 +354,11 @@ func (server *Server) ClientAdd(clientInfo ClientInfo, respClientAdd *RespClient
 				Project:   job.Project,
 				Creator:   job.Creator,
 				CreatTime: job.CreatTime,
+				Server:    job.Server,
 				Script:    job.Script,
 				Dir:       job.Dir,
 				Spec:      job.Spec,
 				Group:     job.Group,
-				Enable:    job.Enable,
-				Server:    clientInfo.Name,
 			}
 			_, err := JobAdd(&req)
 			if err != nil {
@@ -447,7 +441,7 @@ func JobList(req *ReqJobList) (resp map[string][]Job, err error) {
 func JobAdd(req *ReqJobAdd) (resp map[string]bool, err error) {
 	var wg sync.WaitGroup
 	resp = make(map[string]bool)
-	cmd := Cmd{
+	job := Job{
 		Id:     req.Id,
 		Script: req.Script,
 		Dir:    req.Dir,
@@ -459,7 +453,7 @@ func JobAdd(req *ReqJobAdd) (resp map[string]bool, err error) {
 			continue
 		}
 		respJobAdd := new(RespJobAdd)
-		jobAdd := client.Client.Go("Client.JobAdd", cmd, respJobAdd, nil)
+		jobAdd := client.Client.Go("Client.JobAdd", job, respJobAdd, nil)
 		replyCall := <-jobAdd.Done
 		if replyCall.Error != nil || respJobAdd.Code == CodeError {
 			resp[server] = false
@@ -474,11 +468,12 @@ func JobAdd(req *ReqJobAdd) (resp map[string]bool, err error) {
 				Project:   req.Project,
 				Creator:   req.Creator,
 				CreatTime: req.CreatTime,
+				Enable:    true,
+				Server:    req.Server,
 				Script:    req.Script,
 				Dir:       req.Dir,
 				Spec:      req.Spec,
 				Group:     req.Group,
-				Enable:    req.Enable,
 			}
 		}
 		Info.Println("Job add success.")
@@ -490,7 +485,7 @@ func JobAdd(req *ReqJobAdd) (resp map[string]bool, err error) {
 func JobRemove(req *ReqJobRemove) (resp map[string]bool, err error) {
 	var wg sync.WaitGroup
 	resp = make(map[string]bool)
-	cmd := Cmd{
+	job := Job{
 		Id: req.Id,
 	}
 	for server, client := range Clients {
@@ -498,7 +493,7 @@ func JobRemove(req *ReqJobRemove) (resp map[string]bool, err error) {
 			continue
 		}
 		respJobRemove := new(RespJobRemove)
-		jobRemove := client.Client.Go("Client.JobRemove", cmd, respJobRemove, nil)
+		jobRemove := client.Client.Go("Client.JobRemove", job, respJobRemove, nil)
 		replyCall := <-jobRemove.Done
 		if replyCall.Error != nil || respJobRemove.Code == CodeError {
 			resp[server] = false
@@ -517,18 +512,16 @@ func JobRemove(req *ReqJobRemove) (resp map[string]bool, err error) {
 func JobStart(req *ReqJobStart) (resp map[string]bool, err error) {
 	var wg sync.WaitGroup
 	resp = make(map[string]bool)
-	cmd := Cmd{
-		Id: req.Id,
-	}
 	for server, client := range Clients {
+		var job Job
 		if req.Server != "" && req.Server != server {
 			continue
 		}
-		for i, ii := range Clients[server].JobList {
-			if i != req.Id {
+		for id, ii := range Clients[server].JobList {
+			if id != req.Id {
 				continue
 			}
-			cmd = Cmd{
+			job = Job{
 				Id:     req.Id,
 				Script: ii.Script,
 				Dir:    ii.Dir,
@@ -537,11 +530,11 @@ func JobStart(req *ReqJobStart) (resp map[string]bool, err error) {
 			}
 			break
 		}
-		if cmd.Script == "" {
+		if job.Id == 0 {
 			continue
 		}
 		respJobAdd := new(RespJobAdd)
-		jobAdd := client.Client.Go("Client.JobAdd", cmd, respJobAdd, nil)
+		jobAdd := client.Client.Go("Client.JobAdd", job, respJobAdd, nil)
 		replyCall := <-jobAdd.Done
 		if replyCall.Error != nil || respJobAdd.Code == CodeError {
 			resp[server] = false
@@ -559,7 +552,7 @@ func JobStart(req *ReqJobStart) (resp map[string]bool, err error) {
 func JobStop(req *ReqJobStop) (resp map[string]bool, err error) {
 	var wg sync.WaitGroup
 	resp = make(map[string]bool)
-	cmd := Cmd{
+	job := Job{
 		Id: req.Id,
 	}
 	for server, client := range Clients {
@@ -567,7 +560,7 @@ func JobStop(req *ReqJobStop) (resp map[string]bool, err error) {
 			continue
 		}
 		respJobRemove := new(RespJobRemove)
-		jobRemove := client.Client.Go("Client.JobRemove", cmd, respJobRemove, nil)
+		jobRemove := client.Client.Go("Client.JobRemove", job, respJobRemove, nil)
 		replyCall := <-jobRemove.Done
 		if replyCall.Error != nil || respJobRemove.Code == CodeError {
 			resp[server] = false
